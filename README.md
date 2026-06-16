@@ -22,10 +22,13 @@ source .venv/bin/activate
 
 Установить зависимости:
 ```bash
+python3.8 -m pip install MyQR --no-build-isolation
 python3.8 -m pip install -r requirements.txt
 ```
 
-> **Важно:** использовать именно `python3.8 -m pip`, а не просто `pip`. На Ubuntu `pip` и `python` могут указывать на системный Python (3.12).
+> **Важно:** `MyQR` (зависимость robomaster SDK) требует отдельной установки с флагом `--no-build-isolation` из-за несовместимости со свежим setuptools. Остальные пакеты ставятся обычным способом.
+>
+> Использовать именно `python3.8 -m pip`, а не просто `pip` — на Ubuntu `pip` может указывать на системный Python 3.12.
 
 ### Запуск
 
