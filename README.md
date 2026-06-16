@@ -52,6 +52,61 @@ source .venv/bin/activate
 
 > Ручное управление через клавиатуру доступно только когда трекинг **не запущен**.
 
+---
+
+## Запуск на Windows
+
+### Требования
+
+- Windows 10/11 (64-bit)
+- Python **3.8.x** (обязательно именно 3.8, для совместимости с robomaster SDK) — скачать с [python.org](https://www.python.org/downloads/release/python-3820/)
+- NVIDIA GPU + [CUDA Toolkit 12.1](https://developer.nvidia.com/cuda-12-1-0-download-archive) (опционально, для ускорения на GPU)
+- [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) — нужны для сборки некоторых зависимостей
+
+> При установке Python обязательно поставить галочку **"Add Python to PATH"**.
+
+### Установка
+
+Создать и активировать виртуальное окружение:
+```cmd
+py -3.8 -m venv .venv
+.venv\Scripts\activate
+```
+
+Если планируется GPU (NVIDIA), установить PyTorch с поддержкой CUDA отдельно — до установки остальных зависимостей:
+```cmd
+pip install torch==2.4.1+cu121 torchvision==0.19.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+```
+
+Если GPU нет (только CPU):
+```cmd
+pip install torch==2.4.1 torchvision==0.19.1
+```
+
+Затем установить остальные зависимости:
+```cmd
+pip install -r requirements_windows.txt
+```
+
+> Вместо `lap` используется `lapx` — форк с готовыми Windows-совместимыми сборками. Пакеты `triton` и `nvidia-*-cu12` из основного `requirements.txt` на Windows не нужны и не устанавливаются.
+
+### Запуск
+
+```cmd
+.venv\Scripts\python main.py
+```
+
+### Возможные проблемы
+
+| Проблема | Решение |
+|----------|---------|
+| `py -3.8` не найден | Убедиться, что Python 3.8 установлен и добавлен в PATH |
+| Ошибка при установке `lapx` | Установить [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) |
+| `robomaster` не подключается | Отключить брандмауэр Windows или добавить исключение для Python |
+| CUDA не обнаружена | Проверить версию драйвера NVIDIA (`nvidia-smi`) и переустановить CUDA 12.1 |
+
+---
+
 ## Версионирование
 
 Пометки об истории изменений хранятся в VERSIONS.md
