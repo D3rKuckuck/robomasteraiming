@@ -84,7 +84,7 @@ class App:
     def __init__(self):
         pygame.init()
         self.screen = pygame.display.set_mode((WIN_W, WIN_H))
-        pygame.display.set_caption("RoboMaster — Система слежения")
+        pygame.display.set_caption("Система слежения")
 
         self.font_title = _find_font(17, bold=True)
         self.font_med   = _find_font(15)
@@ -95,12 +95,23 @@ class App:
         self.robot   = RobotController()
         self.tracker = PersonTracker()
 
-        self._frame_lock = threading.Lock()
-        self._cur_frame  = None    # numpy BGR array (annotated)
-        self._frame_w    = 0
-        self._frame_h    = 0
+        # Сырой кадр с камеры (обновляется потоком камеры)
+        self._raw_lock   = threading.Lock()
+        self._raw_frame  = None
 
-        self.is_tracking = False
+        # Аннотированный кадр (обновляется потоком YOLO)
+        self._frame_lock = threading.Lock()
+        self._cur_frame  = None
+
+        self._frame_w = 0
+        self._frame_h = 0
+
+        # Поток камеры (запускается при подключении)
+        self._camera_thread    = None
+        self._camera_stop_flag = threading.Event()
+
+        # Поток YOLO-трекинга (запускается кнопкой)
+        self.is_tracking   = False
         self._track_thread = None
         self._stop_flag    = threading.Event()
 
@@ -153,6 +164,7 @@ class App:
             self._log("Подключение...")
             self.robot.connect()
             self._log("Подключено успешно")
+            self._start_camera()
         except Exception as e:
             self._log(f"Ошибка: {e}")
             try:
@@ -161,30 +173,53 @@ class App:
                 pass
         self._refresh_buttons()
 
-    # ── Запуск трекинга ───────────────────────────────────────────────────────
+    # ── Поток камеры (сырое видео, без обработки) ─────────────────────────────
+    def _start_camera(self):
+        first = self.robot.start_camera()
+        if first is None:
+            self._log("Не удалось получить кадр с камеры")
+            return
+        h, w = first.shape[:2]
+        self._frame_w, self._frame_h = w, h
+        self._compute_video_layout(w, h)
+        with self._raw_lock:
+            self._raw_frame = first
+        self._camera_stop_flag.clear()
+        self._camera_thread = threading.Thread(target=self._camera_loop, daemon=True)
+        self._camera_thread.start()
+        self._log("Видео запущено")
+
+    def _camera_loop(self):
+        while not self._camera_stop_flag.is_set():
+            frame = self.robot.read_frame()
+            if frame is not None:
+                with self._raw_lock:
+                    self._raw_frame = frame
+            time.sleep(0.02)
+
+    def _stop_camera(self):
+        self._camera_stop_flag.set()
+        if self._camera_thread:
+            self._camera_thread.join(timeout=2.0)
+        self.robot.stop_camera()
+        with self._raw_lock:
+            self._raw_frame = None
+
+    # ── Запуск YOLO-трекинга ─────────────────────────────────────────────────
     def _start_tracking(self):
         if not self.robot.is_connected or self.is_tracking:
             return
-        try:
-            self._stop_flag.clear()
-            first = self.robot.start_camera()
-            if first is None:
-                raise RuntimeError("Нет кадра с камеры")
-            h, w = first.shape[:2]
-            self._frame_w, self._frame_h = w, h
-            self._compute_video_layout(w, h)
-            self.is_tracking = True
-            self._log("Трекинг запущен. Кликните на цель")
-            self._track_thread = threading.Thread(
-                target=self._tracking_loop, daemon=True
-            )
-            self._track_thread.start()
-        except Exception as e:
-            self._log(f"Ошибка запуска: {e}")
-            self.robot.stop_camera()
+        if self._raw_frame is None:
+            self._log("Видеопоток не готов")
+            return
+        self._stop_flag.clear()
+        self.is_tracking = True
+        self._log("Трекинг запущен. Кликните на цель")
+        self._track_thread = threading.Thread(target=self._tracking_loop, daemon=True)
+        self._track_thread.start()
         self._refresh_buttons()
 
-    # ── Остановка трекинга ────────────────────────────────────────────────────
+    # ── Остановка YOLO-трекинга ───────────────────────────────────────────────
     def _stop_tracking(self):
         if not self.is_tracking:
             return
@@ -192,7 +227,6 @@ class App:
         self.is_tracking = False
         if self._track_thread:
             self._track_thread.join(timeout=3.0)
-        self.robot.stop_camera()
         self.robot.stop_wheels()
         with self._frame_lock:
             self._cur_frame = None
@@ -257,14 +291,17 @@ class App:
                 self.robot.stop_wheels()
                 self._wasd_moving = False
 
-    # ── Поток трекинга ────────────────────────────────────────────────────────
+    # ── Поток YOLO-трекинга ───────────────────────────────────────────────────
     def _tracking_loop(self):
         while not self._stop_flag.is_set():
             t0 = time.time()
-            frame = self.robot.read_frame()
-            if frame is None:
+
+            with self._raw_lock:
+                raw = self._raw_frame
+            if raw is None:
                 time.sleep(0.02)
                 continue
+            frame = raw.copy()  # копируем, чтобы не портить сырой кадр
 
             annotated = self.tracker.process_frame(frame)
             self._drive_from_tracking()
@@ -343,8 +380,16 @@ class App:
         panel = pygame.Surface((VIDEO_W, VIDEO_H))
         panel.fill(C["video_bg"])
 
-        with self._frame_lock:
-            frame = self._cur_frame
+        # Приоритет: аннотированный кадр (YOLO) → сырой кадр → заглушка
+        if self.is_tracking:
+            with self._frame_lock:
+                frame = self._cur_frame
+        else:
+            frame = None
+
+        if frame is None:
+            with self._raw_lock:
+                frame = self._raw_frame
 
         if frame is not None:
             try:
@@ -370,11 +415,7 @@ class App:
         self.screen.blit(panel, (0, 0))
 
     def _draw_no_signal(self, surf):
-        msg = "НЕТ СИГНАЛА"
-        if self.robot.is_connected and not self.is_tracking:
-            msg = "Трекинг не запущен"
-        elif not self.robot.is_connected:
-            msg = "Нет подключения"
+        msg = "Нет подключения" if not self.robot.is_connected else "Ожидание камеры..."
         txt = self.font_title.render(msg, True, C["text_dim"])
         surf.blit(txt, txt.get_rect(center=(VIDEO_W // 2, VIDEO_H // 2)))
 
@@ -384,7 +425,7 @@ class App:
 
         y = 14
         # Заголовок
-        title = self.font_title.render("ROBOMASTER", True, C["blue"])
+        title = self.font_title.render("V0.2 PYGAME", True, C["blue"])
         sb.blit(title, (SIDEBAR_W // 2 - title.get_width() // 2, y))
         y += title.get_height() + 4
         sub = self.font_tiny.render("Система слежения", True, C["text_dim"])
@@ -540,6 +581,7 @@ class App:
             self.is_tracking = False
             if self._track_thread:
                 self._track_thread.join(timeout=3.0)
+        self._stop_camera()
         try:
             self.robot.disconnect()
         except Exception:
