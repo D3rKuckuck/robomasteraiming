@@ -783,22 +783,55 @@ class App:
             left = tr.search_time_left()
             indicator("Поиск", f"{left:.1f} с", C["orange"])
 
+    @staticmethod
+    def _wrap_text(font, text, max_width):
+        """Разбивает text на строки шириной не более max_width пикселей."""
+        if not text:
+            return ['']
+        words, lines, current = text.split(' '), [], ''
+        for word in words:
+            candidate = (current + ' ' + word).lstrip()
+            if font.size(candidate)[0] <= max_width:
+                current = candidate
+            else:
+                if current:
+                    lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        return lines or ['']
+
     def _draw_log(self, surf, y_start, height):
         log_rect = pygame.Rect(8, y_start, SIDEBAR_W - 16, height)
         pygame.draw.rect(surf, C["log_bg"], log_rect, border_radius=4)
-        line_h  = self.font_tiny.get_height() + 2
-        visible = height // line_h
-        lines   = list(self.log)[-visible:]
-        for i, line in enumerate(lines):
-            if line.startswith("[") and "] " in line:
-                end = line.index("] ") + 1
-                ts_s  = self.font_tiny.render(line[:end+1], True, C["text_dim"])
-                msg_s = self.font_tiny.render(line[end+1:], True, C["text"])
-                surf.blit(ts_s,  (12, y_start + i * line_h + 3))
-                surf.blit(msg_s, (12 + ts_s.get_width(), y_start + i * line_h + 3))
+
+        line_h = self.font_tiny.get_height() + 2
+        text_x = 12
+        max_w  = SIDEBAR_W - text_x - 12   # доступная ширина для текста
+
+        # Строим список визуальных строк: каждая — список (surface, x_offset)
+        rows = []
+        for entry in self.log:
+            if entry.startswith("[") and "] " in entry:
+                end     = entry.index("] ") + 1
+                ts_surf = self.font_tiny.render(entry[:end+1], True, C["text_dim"])
+                ts_w    = ts_surf.get_width()
+                msg_lines = self._wrap_text(self.font_tiny, entry[end+1:], max_w - ts_w)
+                # Первая строка: метка времени + начало сообщения
+                rows.append([(ts_surf, 0),
+                              (self.font_tiny.render(msg_lines[0], True, C["text"]), ts_w)])
+                # Продолжение: с отступом под метку
+                for ml in msg_lines[1:]:
+                    rows.append([(self.font_tiny.render(ml, True, C["text"]), ts_w)])
             else:
-                surf.blit(self.font_tiny.render(line, True, C["text"]),
-                          (12, y_start + i * line_h + 3))
+                for ml in self._wrap_text(self.font_tiny, entry, max_w):
+                    rows.append([(self.font_tiny.render(ml, True, C["text"]), 0)])
+
+        visible = height // line_h
+        for i, row in enumerate(rows[-visible:]):
+            y = y_start + i * line_h + 3
+            for s, xoff in row:
+                surf.blit(s, (text_x + xoff, y))
 
     # ── Главный цикл ─────────────────────────────────────────────────────────
     def run(self):
