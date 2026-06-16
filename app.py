@@ -5,38 +5,39 @@ import time
 import cv2
 import pygame
 
-from motion import calculate_movement_speeds, search_speeds
+from motion import calculate_movement_speeds, search_speeds, wasd_rpm
 from robot_controller import RobotController
-from tracker import PersonTracker
+from tracker import PersonTracker, resolve_device
 
-# ── Размеры окна ──────────────────────────────────────────────────────────────
-WIN_W, WIN_H = 1280, 720
+# ── Фиксированные ширины боковых панелей ─────────────────────────────────────
+LEFT_W    = 320
 SIDEBAR_W = 320
-VIDEO_W = WIN_W - SIDEBAR_W   # 960
-VIDEO_H = WIN_H               # 720
+WIN_W_MIN = LEFT_W + 480 + SIDEBAR_W   # минимальная ширина окна
 
-# ── Цветовая схема (тёмная) ───────────────────────────────────────────────────
+# ── Цветовая схема ────────────────────────────────────────────────────────────
 C = {
-    "bg":          (22, 24, 32),
-    "sidebar":     (28, 32, 44),
-    "divider":     (50, 55, 70),
-    "btn":         (52, 76, 128),
-    "btn_hover":   (70, 100, 165),
-    "btn_off":     (42, 42, 55),
-    "btn_danger":  (120, 42, 42),
-    "btn_dng_h":   (155, 58, 58),
-    "text":        (220, 225, 235),
-    "text_dim":    (120, 128, 145),
-    "green":       (72, 210, 115),
-    "red":         (215, 72, 72),
-    "orange":      (225, 160, 42),
-    "blue":        (80, 150, 230),
-    "log_bg":      (16, 18, 26),
-    "video_bg":    (10, 12, 18),
-    "overlay_bg":  (0, 0, 0),
+    "bg":         (22,  24,  32),
+    "sidebar":    (28,  32,  44),
+    "left":       (24,  28,  40),
+    "divider":    (50,  55,  70),
+    "btn":        (52,  76,  128),
+    "btn_hover":  (70,  100, 165),
+    "btn_off":    (42,  42,  55),
+    "btn_danger": (120, 42,  42),
+    "btn_dng_h":  (155, 58,  58),
+    "text":       (220, 225, 235),
+    "text_dim":   (120, 128, 145),
+    "green":      (72,  210, 115),
+    "red":        (215, 72,  72),
+    "orange":     (225, 160, 42),
+    "blue":       (80,  150, 230),
+    "log_bg":     (16,  18,  26),
+    "video_bg":   (10,  12,  18),
+    "val_bg":     (18,  20,  30),
 }
 
 MAX_LOG = 60
+PAD = 12   # горизонтальный отступ внутри панелей
 
 
 def _find_font(size, bold=False):
@@ -47,14 +48,14 @@ def _find_font(size, bold=False):
     return pygame.font.Font(None, size)
 
 
-# ── Компонент кнопки ─────────────────────────────────────────────────────────
+# ── Кнопка ────────────────────────────────────────────────────────────────────
 class Button:
     def __init__(self, rect, label, enabled=True, danger=False):
-        self.rect = pygame.Rect(rect)
-        self.label = label
+        self.rect    = pygame.Rect(rect)
+        self.label   = label
         self.enabled = enabled
-        self.danger = danger
-        self._hover = False
+        self.danger  = danger
+        self._hover  = False
 
     def update(self, event):
         if event.type == pygame.MOUSEMOTION:
@@ -66,8 +67,7 @@ class Button:
 
     def draw(self, surf, font):
         if not self.enabled:
-            bg = C["btn_off"]
-            fg = C["text_dim"]
+            bg, fg = C["btn_off"], C["text_dim"]
         elif self._hover:
             bg = C["btn_dng_h"] if self.danger else C["btn_hover"]
             fg = C["text"]
@@ -79,11 +79,176 @@ class Button:
         surf.blit(txt, txt.get_rect(center=self.rect.center))
 
 
+# ── Числовой спиннер ──────────────────────────────────────────────────────────
+class SpinRow:
+    """Ряд [−] значение [+] в глобальных экранных координатах.
+
+    Клик по полю значения → ввод с клавиатуры.
+    Enter / клик вне поля — применить. Escape — отмена.
+    """
+
+    BTN_W = 26
+
+    def __init__(self, x, y, w, h, value, min_val, max_val, step, fmt="{:.1f}"):
+        self.value   = value
+        self.min_val = min_val
+        self.max_val = max_val
+        self.step    = step
+        self.fmt     = fmt
+        self.enabled = True
+        self.editing = False
+        self._buf    = ""
+        bw = self.BTN_W
+        self.btn_minus = pygame.Rect(x,          y, bw,     h)
+        self.btn_plus  = pygame.Rect(x + w - bw, y, bw,     h)
+        self.display   = pygame.Rect(x + bw,     y, w-2*bw, h)
+
+    # ── Редактирование ────────────────────────────────────────────────────────
+    def start_edit(self):
+        self.editing = True
+        # Показываем текущее значение без суффикса (°, пробелы и т.д.)
+        raw = self.fmt.format(self.value)
+        self._buf = ''.join(c for c in raw if c in '0123456789.-')
+        pygame.key.start_text_input()
+
+    def commit(self):
+        """Применить введённое значение и выйти из режима редактирования."""
+        if self._buf:
+            try:
+                v = float(self._buf)
+                self.value = round(
+                    max(self.min_val, min(self.max_val, v)), 4
+                )
+            except ValueError:
+                pass
+        self.editing = False
+        self._buf = ""
+        pygame.key.stop_text_input()
+
+    def cancel(self):
+        self.editing = False
+        self._buf = ""
+        pygame.key.stop_text_input()
+
+    def handle_textinput(self, text):
+        """Принять символы из pygame.TEXTINPUT (только цифры, точка, минус)."""
+        for ch in text:
+            if ch in '0123456789.':
+                self._buf += ch
+            elif ch == '-' and not self._buf:
+                self._buf += ch
+
+    def handle_keydown(self, key):
+        """Обработать нажатие клавиши в режиме редактирования."""
+        if key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            self.commit()
+            return True
+        if key == pygame.K_ESCAPE:
+            self.cancel()
+            return True
+        if key == pygame.K_BACKSPACE:
+            self._buf = self._buf[:-1]
+            return True
+        return False
+
+    # ── Обычные события (+/−) ─────────────────────────────────────────────────
+    def handle_event(self, event):
+        """Обрабатывает клики по кнопкам +/−. Клик по display управляется снаружи."""
+        if not self.enabled:
+            return False
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.btn_minus.collidepoint(event.pos):
+                self.value = round(max(self.min_val, self.value - self.step), 4)
+                return True
+            if self.btn_plus.collidepoint(event.pos):
+                self.value = round(min(self.max_val, self.value + self.step), 4)
+                return True
+        return False
+
+    # ── Отрисовка ─────────────────────────────────────────────────────────────
+    def draw(self, surf, font):
+        mp = pygame.mouse.get_pos()
+        for rect, label in ((self.btn_minus, "−"), (self.btn_plus, "+")):
+            hover = self.enabled and not self.editing and rect.collidepoint(mp)
+            bg = C["btn_hover"] if hover else (C["btn"] if self.enabled else C["btn_off"])
+            pygame.draw.rect(surf, bg, rect, border_radius=4)
+            t = font.render(label, True, C["text"] if self.enabled else C["text_dim"])
+            surf.blit(t, t.get_rect(center=rect.center))
+
+        if self.editing:
+            # Подсветка поля ввода
+            pygame.draw.rect(surf, C["btn"], self.display)
+            pygame.draw.rect(surf, C["blue"], self.display, 1)
+            # Мигающий курсор
+            cursor = "│" if (time.time() % 1.0 < 0.5) else " "
+            display_text = self._buf + cursor
+            vt = font.render(display_text, True, C["text"])
+            # Выравнивание по левому краю с отступом
+            surf.blit(vt, (self.display.x + 4, self.display.y + (self.display.h - vt.get_height()) // 2))
+        else:
+            pygame.draw.rect(surf, C["val_bg"], self.display)
+            vt = font.render(self.fmt.format(self.value), True,
+                             C["text"] if self.enabled else C["text_dim"])
+            surf.blit(vt, vt.get_rect(center=self.display.center))
+
+
+# ── Пара переключателей ───────────────────────────────────────────────────────
+class TogglePair:
+    """Два взаимоисключающих переключателя (как radio buttons)."""
+
+    def __init__(self, x, y, w, h, options):
+        """options: [(label_a, value_a), (label_b, value_b)]"""
+        self.options  = options
+        self.selected = 0
+        self.enabled  = True
+        half = (w - 4) // 2
+        self.rects = [
+            pygame.Rect(x,          y, half,       h),
+            pygame.Rect(x + half + 4, y, w-half-4, h),
+        ]
+
+    def handle_event(self, event):
+        if not self.enabled:
+            return False
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            for i, rect in enumerate(self.rects):
+                if rect.collidepoint(event.pos) and self.selected != i:
+                    self.selected = i
+                    return True
+        return False
+
+    @property
+    def value(self):
+        return self.options[self.selected][1]
+
+    def draw(self, surf, font):
+        mp = pygame.mouse.get_pos()
+        for i, (rect, (label, _)) in enumerate(zip(self.rects, self.options)):
+            active = (i == self.selected)
+            hover  = self.enabled and rect.collidepoint(mp) and not active
+            if not self.enabled:
+                bg, fg = C["btn_off"], C["text_dim"]
+            elif active:
+                bg, fg = C["green"], C["bg"]
+            elif hover:
+                bg, fg = C["btn_hover"], C["text"]
+            else:
+                bg, fg = C["btn"], C["text_dim"]
+            pygame.draw.rect(surf, bg, rect, border_radius=5)
+            t = font.render(label, True, fg)
+            surf.blit(t, t.get_rect(center=rect.center))
+
+
 # ── Главное приложение ────────────────────────────────────────────────────────
 class App:
     def __init__(self):
         pygame.init()
-        self.screen = pygame.display.set_mode((WIN_W, WIN_H))
+        info = pygame.display.Info()
+        start_w = max(WIN_W_MIN, info.current_w)
+        start_h = max(480,       info.current_h)
+        self.screen = pygame.display.set_mode(
+            (start_w, start_h), pygame.RESIZABLE
+        )
         pygame.display.set_caption("Система слежения")
 
         self.font_title = _find_font(17, bold=True)
@@ -92,88 +257,221 @@ class App:
         self.font_tiny  = _find_font(11)
         self.clock = pygame.time.Clock()
 
-        self.robot   = RobotController()
-        self.tracker = PersonTracker()
+        self.robot = RobotController()
 
-        # Сырой кадр с камеры (обновляется потоком камеры)
+        # Создаём трекер с дефолтными настройками; пересоздаётся при смене конфига
+        self._cur_model  = 'yolo11n.pt'
+        self._cur_device = 'cpu'
+        self.tracker = PersonTracker(self._cur_model, self._cur_device)
+
+        # Кадры
         self._raw_lock   = threading.Lock()
         self._raw_frame  = None
-
-        # Аннотированный кадр (обновляется потоком YOLO)
         self._frame_lock = threading.Lock()
         self._cur_frame  = None
-
         self._frame_w = 0
         self._frame_h = 0
 
-        # Поток камеры (запускается при подключении)
+        # Потоки
         self._camera_thread    = None
         self._camera_stop_flag = threading.Event()
-
-        # Поток YOLO-трекинга (запускается кнопкой)
-        self.is_tracking   = False
-        self._track_thread = None
-        self._stop_flag    = threading.Event()
+        self.is_tracking       = False
+        self._track_thread     = None
+        self._stop_flag        = threading.Event()
 
         self.log: collections.deque = collections.deque(maxlen=MAX_LOG)
 
-        # Видео: масштаб и смещение в пределах VIDEO_W x VIDEO_H
+        # Видео: масштаб и смещение внутри видеопанели
         self._vscale = 1.0
         self._voff_x = 0
         self._voff_y = 0
 
-        # FPS-счётчик трекингового потока
-        self._track_fps = 0.0
+        # FPS трекингового потока
+        self._track_fps  = 0.0
         self._fps_times: collections.deque = collections.deque(maxlen=30)
 
-        # Флаг ручного управления колёсами (WASD)
         self._wasd_moving = False
+        self._active_spin = None   # SpinRow в режиме редактирования
 
-        self._build_buttons()
+        self._build_ui()
 
-    # ── UI-кнопки ─────────────────────────────────────────────────────────────
-    def _build_buttons(self):
-        x = VIDEO_W + 12
-        w = SIDEBAR_W - 24
-        self.btn_connect = Button((x, 130, w, 36), "Подключиться")
-        self.btn_track   = Button((x, 174, w, 36), "Запуск трекинга", enabled=False)
-        self.btn_stop    = Button((x, 218, w, 36), "Остановить",      enabled=False, danger=True)
-        self.btn_reset   = Button((x, 262, w, 36), "Сброс цели",      enabled=False)
-        self._buttons = [self.btn_connect, self.btn_track, self.btn_stop, self.btn_reset]
+    # ── Динамические размеры ──────────────────────────────────────────────────
+    @property
+    def _vw(self):
+        """Текущая ширина видеопанели (меняется при ресайзе)."""
+        return self.screen.get_width() - LEFT_W - SIDEBAR_W
+
+    @property
+    def _wh(self):
+        """Текущая высота окна."""
+        return self.screen.get_height()
+
+    def _on_resize(self):
+        """Вызывается при изменении размера окна."""
+        self._reposition_sidebar_buttons()
+        if self._frame_w > 0:
+            self._compute_video_layout(self._frame_w, self._frame_h)
+
+    def _reposition_sidebar_buttons(self):
+        """Пересчитывает X-позиции кнопок правой панели."""
+        rx = LEFT_W + self._vw + PAD
+        rw = SIDEBAR_W - 2 * PAD
+        for i, btn in enumerate([self.btn_connect, self.btn_track, self.btn_stop,
+                                   self.btn_reset, self.btn_disconnect]):
+            btn.rect = pygame.Rect(rx, 130 + i * 44, rw, 36)
+
+    # ── Построение UI ─────────────────────────────────────────────────────────
+    def _build_ui(self):
+        # --- Правая панель: кнопки управления ---
+        rx = LEFT_W + self._vw + PAD
+        rw = SIDEBAR_W - 2 * PAD
+
+        self.btn_connect    = Button((rx, 130, rw, 36), "Подключиться")
+        self.btn_track      = Button((rx, 174, rw, 36), "Запуск трекинга",  enabled=False)
+        self.btn_stop       = Button((rx, 218, rw, 36), "Остановить",       enabled=False, danger=True)
+        self.btn_reset      = Button((rx, 262, rw, 36), "Сброс цели",       enabled=False)
+        self.btn_disconnect = Button((rx, 306, rw, 36), "Отключиться",      enabled=False, danger=True)
+        self._buttons = [
+            self.btn_connect, self.btn_track, self.btn_stop,
+            self.btn_reset, self.btn_disconnect,
+        ]
+
+        # --- Левая панель: параметры ---
+        # Все Y-позиции вычислены вручную с учётом высоты меток (13px), отступов
+        # и разделителей. Схема на один блок:
+        #   divider(1) + gap(4) + section_title(13) + gap(4) = 22px
+        #   label(13) + gap(2) + spinrow(24) + gap(4) = 43px
+        lx = PAD
+        lw = LEFT_W - 2 * PAD
+        ROW_H = 24
+
+        def spin(y, val, lo, hi, step, fmt="{:.1f}"):
+            return SpinRow(lx, y, lw, ROW_H, val, lo, hi, step, fmt)
+
+        # ── Скорости вращения ─────────────────────────────────── y=8
+        # label at 30, spin at 45
+        self.spin_max_rot = spin(45,  1.0, 0.1, 3.0, 0.1)   # bottom=69
+        # label at 73, spin at 88
+        self.spin_min_rot = spin(88,  0.1, 0.1, 3.0, 0.1)   # bottom=112
+
+        # ── Скорость вперёд ───────────────────────────────────── y=120
+        # label at 142, spin at 157
+        self.spin_max_fwd = spin(157, 1.0, 0.1, 8.0, 0.1)   # bottom=181
+        # label at 185, spin at 200
+        self.spin_min_fwd = spin(200, 0.1, 0.1, 8.0, 0.1)   # bottom=224
+
+        # ── Скорость назад ────────────────────────────────────── y=232
+        # label at 254, spin at 269
+        self.spin_max_bwd = spin(269, 0.5, 0.1, 8.0, 0.1)   # bottom=293
+        # label at 297, spin at 312
+        self.spin_min_bwd = spin(312, 0.1, 0.1, 8.0, 0.1)   # bottom=336
+
+        # ── Дистанция ─────────────────────────────────────────── y=344
+        # label at 366, spin at 381
+        self.spin_min_dist = spin(381, 1500, 200,  4000, 50, "{:.0f}")  # bottom=405
+        # label at 409, spin at 424
+        self.spin_max_dist = spin(424, 3000, 500,  6000, 50, "{:.0f}")  # bottom=448
+
+        # ── Модель YOLO ───────────────────────────────────────── y=456
+        # toggle at 478, bottom=506; hint1=508, hint2=521
+        self.toggle_model = TogglePair(
+            lx, 478, lw, 26,
+            [("yolo11n", "yolo11n.pt"), ("yolo26n", "yolo26n.pt")],
+        )
+
+        # ── Устройство ────────────────────────────────────────── y=536
+        # toggle at 558, bottom=584; hint=586
+        self.toggle_device = TogglePair(
+            lx, 558, lw, 26,
+            [("CPU", "cpu"), ("GPU (CUDA)", "cuda")],
+        )
+
+        # ── Гимбал ────────────────────────────────────────────── y=606
+        # label at 622, spin at 637, bottom=661; btn=665
+        self.spin_gimbal = spin(637, 15, 0, 35, 1, "{:.0f}°")
+        self.btn_gimbal  = Button((lx, 665, lw, 26), "Применить угол", enabled=False)
+
+        self._speed_spins = [
+            self.spin_max_rot, self.spin_min_rot,
+            self.spin_max_fwd, self.spin_min_fwd,
+            self.spin_max_bwd, self.spin_min_bwd,
+        ]
+        self._dist_spins  = [self.spin_min_dist, self.spin_max_dist]
+        self._left_spins  = self._speed_spins + self._dist_spins + [self.spin_gimbal]
+
+        self._reposition_sidebar_buttons()
 
     def _refresh_buttons(self):
         c = self.robot.is_connected
         t = self.is_tracking
         h = self.tracker.selected_id is not None
-        self.btn_connect.enabled = not c
-        self.btn_track.enabled   = c and not t
-        self.btn_stop.enabled    = t
-        self.btn_reset.enabled   = t and h
+
+        self.btn_connect.enabled    = not c
+        self.btn_track.enabled      = c and not t
+        self.btn_stop.enabled       = t
+        self.btn_reset.enabled      = t and h
+        self.btn_disconnect.enabled = c and not t
+
+        # Дистанции — только до трекинга
+        for s in self._dist_spins:
+            s.enabled = not t
+
+        # Модель и устройство — только до подключения
+        self.toggle_model.enabled  = not c
+        self.toggle_device.enabled = not c
+
+        # Гимбал — подключены, не в трекинге
+        self.spin_gimbal.enabled = c and not t
+        self.btn_gimbal.enabled  = c and not t
 
     # ── Лог ───────────────────────────────────────────────────────────────────
     def _log(self, msg):
         ts = time.strftime("%H:%M:%S")
         self.log.append(f"[{ts}] {msg}")
 
-    # ── Подключение к роботу ──────────────────────────────────────────────────
+    # ── Подключение ───────────────────────────────────────────────────────────
     def _connect(self):
         if self.robot.is_connected:
             self._log("Уже подключено")
             return
         try:
             self._log("Подключение...")
-            self.robot.connect()
+            self.robot.connect(gimbal_pitch_deg=int(self.spin_gimbal.value))
             self._log("Подключено успешно")
             self._start_camera()
         except Exception as e:
-            self._log(f"Ошибка: {e}")
+            self._log(f"Ошибка подключения: {e}")
             try:
                 self.robot.disconnect()
             except Exception:
                 pass
         self._refresh_buttons()
 
-    # ── Поток камеры (сырое видео, без обработки) ─────────────────────────────
+    # ── Отключение ────────────────────────────────────────────────────────────
+    def _disconnect(self):
+        if not self.robot.is_connected:
+            return
+        if self.is_tracking:
+            self._stop_tracking()
+        self._stop_camera()
+        try:
+            self.robot.disconnect()
+            self._log("Отключено")
+        except Exception as e:
+            self._log(f"Ошибка отключения: {e}")
+        self._refresh_buttons()
+
+    # ── Гимбал ────────────────────────────────────────────────────────────────
+    def _apply_gimbal(self):
+        angle = int(self.spin_gimbal.value)
+        self._log(f"Гимбал → {angle}°...")
+        try:
+            self.robot.set_gimbal_pitch(angle)
+            self._log(f"Гимбал установлен: {angle}°")
+        except Exception as e:
+            self._log(f"Ошибка гимбала: {e}")
+
+    # ── Поток камеры ──────────────────────────────────────────────────────────
     def _start_camera(self):
         first = self.robot.start_camera()
         if first is None:
@@ -205,13 +503,24 @@ class App:
         with self._raw_lock:
             self._raw_frame = None
 
-    # ── Запуск YOLO-трекинга ─────────────────────────────────────────────────
+    # ── Трекинг ───────────────────────────────────────────────────────────────
     def _start_tracking(self):
         if not self.robot.is_connected or self.is_tracking:
             return
         if self._raw_frame is None:
             self._log("Видеопоток не готов")
             return
+
+        # Пересоздаём трекер если конфиг поменялся
+        new_model  = self.toggle_model.value
+        new_device = resolve_device(self.toggle_device.value)
+        if new_model != self._cur_model or new_device != self._cur_device:
+            self._log(f"Загрузка {new_model} на {new_device}...")
+            self.tracker    = PersonTracker(new_model, new_device)
+            self._cur_model  = new_model
+            self._cur_device = new_device
+            self._log("Модель загружена")
+
         self._stop_flag.clear()
         self.is_tracking = True
         self._log("Трекинг запущен. Кликните на цель")
@@ -219,7 +528,6 @@ class App:
         self._track_thread.start()
         self._refresh_buttons()
 
-    # ── Остановка YOLO-трекинга ───────────────────────────────────────────────
     def _stop_tracking(self):
         if not self.is_tracking:
             return
@@ -233,27 +541,28 @@ class App:
         self._log("Трекинг остановлен")
         self._refresh_buttons()
 
-    # ── Сброс цели ────────────────────────────────────────────────────────────
     def _reset_target(self):
         self.tracker.reset()
         self.robot.stop_wheels()
         self._log("Цель сброшена")
         self._refresh_buttons()
 
-    # ── Вычисление размещения видео ───────────────────────────────────────────
+    # ── Видео: масштаб ────────────────────────────────────────────────────────
     def _compute_video_layout(self, fw, fh):
-        sx = VIDEO_W / fw
-        sy = VIDEO_H / fh
+        sx = self._vw / fw
+        sy = self._wh  / fh
         self._vscale = min(sx, sy)
         dw = int(fw * self._vscale)
         dh = int(fh * self._vscale)
-        self._voff_x = (VIDEO_W - dw) // 2
-        self._voff_y = (VIDEO_H - dh) // 2
+        self._voff_x = (self._vw - dw) // 2
+        self._voff_y = (self._wh  - dh) // 2
 
     def _screen_to_frame(self, sx, sy):
-        return (sx - self._voff_x) / self._vscale, (sy - self._voff_y) / self._vscale
+        """Перевод глобальных координат клика в координаты кадра камеры."""
+        lx = sx - LEFT_W - self._voff_x
+        ly = sy - self._voff_y
+        return lx / self._vscale, ly / self._vscale
 
-    # ── Клик по видеообласти (выбор цели) ────────────────────────────────────
     def _handle_video_click(self, sx, sy):
         if not self.is_tracking or self._frame_w == 0:
             return
@@ -267,7 +576,7 @@ class App:
             self._log("Цель не найдена рядом с кликом")
         self._refresh_buttons()
 
-    # ── Ручное управление WASD (только вне трекинга) ─────────────────────────
+    # ── Ручное управление WASD ────────────────────────────────────────────────
     def _handle_manual_drive(self):
         if not self.robot.is_connected or self.is_tracking:
             if self._wasd_moving:
@@ -275,16 +584,16 @@ class App:
             return
         keys = pygame.key.get_pressed()
         if keys[pygame.K_w]:
-            self.robot.drive_wheels(150, 150, 150, 150)
+            self.robot.drive_wheels(*wasd_rpm(forward=0.8))
             self._wasd_moving = True
         elif keys[pygame.K_s]:
-            self.robot.drive_wheels(-150, -150, -150, -150)
+            self.robot.drive_wheels(*wasd_rpm(forward=-0.8))
             self._wasd_moving = True
         elif keys[pygame.K_a]:
-            self.robot.drive_wheels(100, -100, -100, 100)
+            self.robot.drive_wheels(*wasd_rpm(strafe=-0.5))
             self._wasd_moving = True
         elif keys[pygame.K_d]:
-            self.robot.drive_wheels(-100, 100, 100, -100)
+            self.robot.drive_wheels(*wasd_rpm(strafe=0.5))
             self._wasd_moving = True
         else:
             if self._wasd_moving:
@@ -301,12 +610,10 @@ class App:
             if raw is None:
                 time.sleep(0.02)
                 continue
-            frame = raw.copy()  # копируем, чтобы не портить сырой кадр
+            frame = raw.copy()
 
             annotated = self.tracker.process_frame(frame)
             self._drive_from_tracking()
-
-            # Оверлеи на кадр (OpenCV)
             self._draw_cv_hud(annotated)
 
             with self._frame_lock:
@@ -319,8 +626,7 @@ class App:
                     self._track_fps = (len(self._fps_times) - 1) / span
 
             elapsed = time.time() - t0
-            sleep = max(0, 0.033 - elapsed)
-            time.sleep(sleep)
+            time.sleep(max(0, 0.033 - elapsed))
 
         self.is_tracking = False
 
@@ -336,7 +642,15 @@ class App:
                 self._log("Цель найдена")
             tx, _ = tr.tracks[tr.selected_id]
             w1, w2, w3, w4 = calculate_movement_speeds(
-                tx, self._frame_w, self.robot.distance_mm
+                tx, self._frame_w, self.robot.distance_mm,
+                max_rotation_rev_s = self.spin_max_rot.value,
+                min_rotation_rev_s = self.spin_min_rot.value,
+                max_fwd_m_s        = self.spin_max_fwd.value,
+                min_fwd_m_s        = self.spin_min_fwd.value,
+                max_bwd_m_s        = self.spin_max_bwd.value,
+                min_bwd_m_s        = self.spin_min_bwd.value,
+                min_dist_mm        = self.spin_min_dist.value,
+                max_dist_mm        = self.spin_max_dist.value,
             )
             try:
                 self.robot.drive_wheels(w1, w2, w3, w4)
@@ -347,7 +661,8 @@ class App:
                 tr.begin_search()
                 self._log("Цель потеряна — поиск...")
             if not tr.search_timed_out():
-                w1, w2, w3, w4 = search_speeds(tr.search_direction, tr.SEARCH_ROTATION_SPEED)
+                w1, w2, w3, w4 = search_speeds(tr.search_direction,
+                                                tr.SEARCH_ROTATION_SPEED)
                 try:
                     self.robot.drive_wheels(w1, w2, w3, w4)
                 except Exception:
@@ -372,60 +687,125 @@ class App:
     # ── Рендер ────────────────────────────────────────────────────────────────
     def _draw(self):
         self.screen.fill(C["bg"])
+        self._draw_left_panel()
         self._draw_video_panel()
         self._draw_sidebar()
         pygame.display.flip()
 
+    # ── Левая панель ──────────────────────────────────────────────────────────
+    def _draw_left_panel(self):
+        panel = pygame.Surface((LEFT_W, self._wh))
+        panel.fill(C["left"])
+        self.screen.blit(panel, (0, 0))
+
+        lx = PAD
+
+        def section(title, y):
+            """Рисует разделитель + заголовок секции; возвращает y нижней границы."""
+            pygame.draw.line(self.screen, C["divider"], (lx, y), (LEFT_W - lx, y))
+            y += 5
+            t = self.font_tiny.render(title, True, C["blue"])
+            self.screen.blit(t, (lx, y))
+            return y + t.get_height() + 4
+
+        def lbl(text, y):
+            """Рисует метку; возвращает y нижней границы."""
+            t = self.font_tiny.render(text, True, C["text_dim"])
+            self.screen.blit(t, (lx, y))
+            return y + t.get_height() + 2
+
+        def hint(text, y):
+            t = self.font_tiny.render(text, True, C["text_dim"])
+            self.screen.blit(t, (lx + 4, y))
+            return y + t.get_height() + 2
+
+        # ── Скорости вращения ──────── y=8
+        section("СКОРОСТИ ВРАЩЕНИЯ (об/с)", 8)
+        lbl("Макс. скорость поворота",  30)
+        self.spin_max_rot.draw(self.screen, self.font_small)
+        lbl("Мин. скорость (мёртвая зона)", 73)
+        self.spin_min_rot.draw(self.screen, self.font_small)
+
+        # ── Скорость вперёд ────────── y=120
+        section("СКОРОСТЬ ВПЕРЁД (м/с)", 120)
+        lbl("Макс.", 142)
+        self.spin_max_fwd.draw(self.screen, self.font_small)
+        lbl("Мин.", 185)
+        self.spin_min_fwd.draw(self.screen, self.font_small)
+
+        # ── Скорость назад ─────────── y=232
+        section("СКОРОСТЬ НАЗАД (м/с)", 232)
+        lbl("Макс.", 254)
+        self.spin_max_bwd.draw(self.screen, self.font_small)
+        lbl("Мин.", 297)
+        self.spin_min_bwd.draw(self.screen, self.font_small)
+
+        # ── Дистанция ──────────────── y=344
+        section("ДИСТАНЦИЯ (мм)", 344)
+        lbl("Мин. (ближе — ехать назад)", 366)
+        self.spin_min_dist.draw(self.screen, self.font_small)
+        lbl("Макс. (дальше — полный вперёд)", 409)
+        self.spin_max_dist.draw(self.screen, self.font_small)
+
+        # ── Модель YOLO ────────────── y=456
+        section("МОДЕЛЬ YOLO", 456)
+        self.toggle_model.draw(self.screen, self.font_small)
+        hint("yolo11n — быстрее на GPU",        508)
+        hint("yolo26n — эффективнее на CPU",    521)
+
+        # ── Устройство ─────────────── y=536
+        section("УСТРОЙСТВО", 536)
+        self.toggle_device.draw(self.screen, self.font_small)
+        hint("GPU — только при наличии CUDA",   586)
+
+        # ── Гимбал ─────────────────── y=606
+        section("ГИМБАЛ (0–35°)", 606)
+        lbl("Угол наклона башни", 622)
+        self.spin_gimbal.draw(self.screen, self.font_small)
+        self.btn_gimbal.draw(self.screen, self.font_small)
+
+    # ── Видеопанель ───────────────────────────────────────────────────────────
     def _draw_video_panel(self):
-        panel = pygame.Surface((VIDEO_W, VIDEO_H))
+        panel = pygame.Surface((self._vw, self._wh))
         panel.fill(C["video_bg"])
 
-        # Приоритет: аннотированный кадр (YOLO) → сырой кадр → заглушка
+        frame = None
         if self.is_tracking:
             with self._frame_lock:
                 frame = self._cur_frame
-        else:
-            frame = None
-
         if frame is None:
             with self._raw_lock:
                 frame = self._raw_frame
 
         if frame is not None:
             try:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 fh, fw = rgb.shape[:2]
                 surf = pygame.image.frombuffer(rgb.tobytes(), (fw, fh), "RGB")
-                dw = int(fw * self._vscale)
-                dh = int(fh * self._vscale)
+                dw   = int(fw * self._vscale)
+                dh   = int(fh * self._vscale)
                 scaled = pygame.transform.scale(surf, (dw, dh))
                 panel.blit(scaled, (self._voff_x, self._voff_y))
             except Exception:
                 pass
         else:
-            self._draw_no_signal(panel)
+            msg = "Нет подключения" if not self.robot.is_connected else "Ожидание камеры..."
+            txt = self.font_title.render(msg, True, C["text_dim"])
+            panel.blit(txt, txt.get_rect(center=(self._vw // 2, self._wh // 2)))
 
-        # FPS
         if self.is_tracking and self._track_fps > 0:
-            fps_surf = self.font_small.render(
-                f"{self._track_fps:.1f} fps", True, C["text_dim"]
-            )
-            panel.blit(fps_surf, (VIDEO_W - fps_surf.get_width() - 8, 8))
+            fps_s = self.font_small.render(f"{self._track_fps:.1f} fps", True, C["text_dim"])
+            panel.blit(fps_s, (self._vw - fps_s.get_width() - 8, 8))
 
-        self.screen.blit(panel, (0, 0))
+        self.screen.blit(panel, (LEFT_W, 0))
 
-    def _draw_no_signal(self, surf):
-        msg = "Нет подключения" if not self.robot.is_connected else "Ожидание камеры..."
-        txt = self.font_title.render(msg, True, C["text_dim"])
-        surf.blit(txt, txt.get_rect(center=(VIDEO_W // 2, VIDEO_H // 2)))
-
+    # ── Правая панель ─────────────────────────────────────────────────────────
     def _draw_sidebar(self):
-        sb = pygame.Surface((SIDEBAR_W, WIN_H))
+        sb = pygame.Surface((SIDEBAR_W, self._wh))
         sb.fill(C["sidebar"])
 
         y = 14
-        # Заголовок
-        title = self.font_title.render("V0.2 PYGAME", True, C["blue"])
+        title = self.font_title.render("V0.3", True, C["blue"])
         sb.blit(title, (SIDEBAR_W // 2 - title.get_width() // 2, y))
         y += title.get_height() + 4
         sub = self.font_tiny.render("Система слежения", True, C["text_dim"])
@@ -434,40 +814,32 @@ class App:
         pygame.draw.line(sb, C["divider"], (8, y), (SIDEBAR_W - 8, y))
         y += 10
 
-        # Статус
         self._draw_status_block(sb, y)
-        y = 310
+        y = 360
 
-        # Лог
         pygame.draw.line(sb, C["divider"], (8, y), (SIDEBAR_W - 8, y))
         y += 6
         lbl = self.font_small.render("ЛОГ", True, C["text_dim"])
         sb.blit(lbl, (10, y))
         y += lbl.get_height() + 4
 
-        log_h = WIN_H - y - 80
+        log_h = self._wh - y - 80
         self._draw_log(sb, y, log_h)
 
-        # Управление клавиатурой
-        y = WIN_H - 74
+        y = self._wh - 74
         pygame.draw.line(sb, C["divider"], (8, y), (SIDEBAR_W - 8, y))
         y += 6
-        hints = [
-            ("W/S", "вперёд / назад"),
-            ("A/D", "стрейф влево / вправо"),
-        ]
         if self.is_tracking:
             note = self.font_tiny.render("Ручное управление: только вне трекинга", True, C["text_dim"])
             sb.blit(note, (10, y))
         else:
-            for key, desc in hints:
+            for key, desc in [("W/S", "вперёд / назад"), ("A/D", "стрейф влево / вправо")]:
                 line = self.font_tiny.render(f"{key}  —  {desc}", True, C["text_dim"])
                 sb.blit(line, (10, y))
                 y += line.get_height() + 2
 
-        self.screen.blit(sb, (VIDEO_W, 0))
+        self.screen.blit(sb, (LEFT_W + self._vw, 0))
 
-        # Кнопки (поверх sidebar, в глобальных координатах)
         for btn in self._buttons:
             btn.draw(self.screen, self.font_med)
 
@@ -483,13 +855,9 @@ class App:
             surf.blit(val_s, (30 + lbl_s.get_width() + 4, y))
             y += lbl_s.get_height() + 6
 
-        # Связь
-        if self.robot.is_connected:
-            indicator("Связь", "Подключено", C["green"])
-        else:
-            indicator("Связь", "Отключено", C["red"])
+        indicator("Связь",  "Подключено" if self.robot.is_connected else "Отключено",
+                  C["green"] if self.robot.is_connected else C["red"])
 
-        # Трекинг
         if not self.is_tracking:
             indicator("Трекинг", "ВЫКЛ", C["red"])
         elif tr.selected_id is None:
@@ -501,45 +869,69 @@ class App:
         else:
             indicator("Трекинг", "ПОТЕРЯ", C["red"])
 
-        # Цель
-        tid_text = str(tr.selected_id) if tr.selected_id is not None else "нет"
-        indicator("Цель ID", tid_text, C["text"])
+        indicator("Цель ID", str(tr.selected_id) if tr.selected_id is not None else "нет",
+                  C["text"])
 
-        # Расстояние
-        dist_text = f"{int(self.robot.distance_mm)} мм"
-        dist_color = C["green"]
         d = self.robot.distance_mm
-        if d < 1500 or d > 3000:
-            dist_color = C["orange"]
-        indicator("Дист.", dist_text, dist_color)
+        dist_color = C["green"] if self.spin_min_dist.value <= d <= self.spin_max_dist.value else C["orange"]
+        indicator("Дист.", f"{int(d)} мм", dist_color)
 
-        # Оставшееся время поиска
+        indicator("Модель", self._cur_model, C["text_dim"])
+        indicator("Устр.", self._cur_device, C["text_dim"])
+
         if tr.is_searching:
             left = tr.search_time_left()
             indicator("Поиск", f"{left:.1f} с", C["orange"])
-            y += 4
+
+    @staticmethod
+    def _wrap_text(font, text, max_width):
+        """Разбивает text на строки шириной не более max_width пикселей."""
+        if not text:
+            return ['']
+        words, lines, current = text.split(' '), [], ''
+        for word in words:
+            candidate = (current + ' ' + word).lstrip()
+            if font.size(candidate)[0] <= max_width:
+                current = candidate
+            else:
+                if current:
+                    lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        return lines or ['']
 
     def _draw_log(self, surf, y_start, height):
         log_rect = pygame.Rect(8, y_start, SIDEBAR_W - 16, height)
         pygame.draw.rect(surf, C["log_bg"], log_rect, border_radius=4)
 
         line_h = self.font_tiny.get_height() + 2
-        visible = height // line_h
-        lines = list(self.log)[-visible:]
+        text_x = 12
+        max_w  = SIDEBAR_W - text_x - 12   # доступная ширина для текста
 
-        for i, line in enumerate(lines):
-            # Метку времени выделяем тусклым, текст — обычным
-            if line.startswith("[") and "] " in line:
-                bracket_end = line.index("] ") + 1
-                ts_part  = line[:bracket_end + 1]
-                msg_part = line[bracket_end + 1:]
-                ts_surf  = self.font_tiny.render(ts_part,  True, C["text_dim"])
-                msg_surf = self.font_tiny.render(msg_part, True, C["text"])
-                surf.blit(ts_surf,  (12, y_start + i * line_h + 3))
-                surf.blit(msg_surf, (12 + ts_surf.get_width(), y_start + i * line_h + 3))
+        # Строим список визуальных строк: каждая — список (surface, x_offset)
+        rows = []
+        for entry in self.log:
+            if entry.startswith("[") and "] " in entry:
+                end     = entry.index("] ") + 1
+                ts_surf = self.font_tiny.render(entry[:end+1], True, C["text_dim"])
+                ts_w    = ts_surf.get_width()
+                msg_lines = self._wrap_text(self.font_tiny, entry[end+1:], max_w - ts_w)
+                # Первая строка: метка времени + начало сообщения
+                rows.append([(ts_surf, 0),
+                              (self.font_tiny.render(msg_lines[0], True, C["text"]), ts_w)])
+                # Продолжение: с отступом под метку
+                for ml in msg_lines[1:]:
+                    rows.append([(self.font_tiny.render(ml, True, C["text"]), ts_w)])
             else:
-                s = self.font_tiny.render(line, True, C["text"])
-                surf.blit(s, (12, y_start + i * line_h + 3))
+                for ml in self._wrap_text(self.font_tiny, entry, max_w):
+                    rows.append([(self.font_tiny.render(ml, True, C["text"]), 0)])
+
+        visible = height // line_h
+        for i, row in enumerate(rows[-visible:]):
+            y = y_start + i * line_h + 3
+            for s, xoff in row:
+                surf.blit(s, (text_x + xoff, y))
 
     # ── Главный цикл ─────────────────────────────────────────────────────────
     def run(self):
@@ -549,17 +941,45 @@ class App:
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         running = False
+                    if event.type == pygame.WINDOWRESIZED:
+                        self._on_resize()
 
-                    if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                        running = False
+                    # ── Режим ввода с клавиатуры ─────────────────────────────
+                    if self._active_spin is not None:
+                        if event.type == pygame.TEXTINPUT:
+                            self._active_spin.handle_textinput(event.text)
+                            continue   # не обрабатываем событие дальше
+                        if event.type == pygame.KEYDOWN:
+                            if self._active_spin.handle_keydown(event.key):
+                                if not self._active_spin.editing:
+                                    self._active_spin = None
+                                continue
+                            # Escape без активного ввода — закрыть приложение
+                    else:
+                        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                            running = False
 
-                    # Клик в область видео
-                    if (event.type == pygame.MOUSEBUTTONDOWN
-                            and event.button == 1
-                            and event.pos[0] < VIDEO_W):
+                    # ── Клик: управление активным спиннером ──────────────────
+                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        clicked_spin = next(
+                            (s for s in self._left_spins
+                             if s.enabled and s.display.collidepoint(event.pos)),
+                            None
+                        )
+                        if self._active_spin and self._active_spin is not clicked_spin:
+                            self._active_spin.commit()
+                            self._active_spin = None
+                        if clicked_spin and clicked_spin is not self._active_spin:
+                            clicked_spin.start_edit()
+                            self._active_spin = clicked_spin
+                            continue   # не передаём клик дальше (иначе сработает +/−)
+
+                    # Клик по видеообласти
+                    if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
+                            and LEFT_W <= event.pos[0] < LEFT_W + self._vw):
                         self._handle_video_click(*event.pos)
 
-                    # Кнопки
+                    # Правая панель: кнопки
                     if self.btn_connect.update(event):
                         threading.Thread(target=self._connect, daemon=True).start()
                     if self.btn_track.update(event):
@@ -568,6 +988,19 @@ class App:
                         threading.Thread(target=self._stop_tracking, daemon=True).start()
                     if self.btn_reset.update(event):
                         self._reset_target()
+                    if self.btn_disconnect.update(event):
+                        threading.Thread(target=self._disconnect, daemon=True).start()
+                    if self.btn_gimbal.update(event):
+                        threading.Thread(target=self._apply_gimbal, daemon=True).start()
+
+                    # Левая панель: +/− кнопки и переключатели
+                    for spin in self._left_spins:
+                        spin.handle_event(event)
+
+                    if self.toggle_model.handle_event(event):
+                        pass
+                    if self.toggle_device.handle_event(event):
+                        pass
 
                 self._handle_manual_drive()
                 self._draw()
