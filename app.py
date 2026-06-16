@@ -9,12 +9,10 @@ from motion import calculate_movement_speeds, search_speeds, wasd_rpm
 from robot_controller import RobotController
 from tracker import PersonTracker, resolve_device
 
-# ── Размеры окна ──────────────────────────────────────────────────────────────
+# ── Фиксированные ширины боковых панелей ─────────────────────────────────────
 LEFT_W    = 320
-VIDEO_W   = 960
 SIDEBAR_W = 320
-WIN_W = LEFT_W + VIDEO_W + SIDEBAR_W   # 1600
-WIN_H = 720
+WIN_W_MIN = LEFT_W + 480 + SIDEBAR_W   # минимальная ширина окна
 
 # ── Цветовая схема ────────────────────────────────────────────────────────────
 C = {
@@ -176,7 +174,12 @@ class TogglePair:
 class App:
     def __init__(self):
         pygame.init()
-        self.screen = pygame.display.set_mode((WIN_W, WIN_H))
+        info = pygame.display.Info()
+        start_w = max(WIN_W_MIN, info.current_w)
+        start_h = max(480,       info.current_h)
+        self.screen = pygame.display.set_mode(
+            (start_w, start_h), pygame.RESIZABLE
+        )
         pygame.display.set_caption("Система слежения")
 
         self.font_title = _find_font(17, bold=True)
@@ -222,10 +225,35 @@ class App:
 
         self._build_ui()
 
+    # ── Динамические размеры ──────────────────────────────────────────────────
+    @property
+    def _vw(self):
+        """Текущая ширина видеопанели (меняется при ресайзе)."""
+        return self.screen.get_width() - LEFT_W - SIDEBAR_W
+
+    @property
+    def _wh(self):
+        """Текущая высота окна."""
+        return self.screen.get_height()
+
+    def _on_resize(self):
+        """Вызывается при изменении размера окна."""
+        self._reposition_sidebar_buttons()
+        if self._frame_w > 0:
+            self._compute_video_layout(self._frame_w, self._frame_h)
+
+    def _reposition_sidebar_buttons(self):
+        """Пересчитывает X-позиции кнопок правой панели."""
+        rx = LEFT_W + self._vw + PAD
+        rw = SIDEBAR_W - 2 * PAD
+        for i, btn in enumerate([self.btn_connect, self.btn_track, self.btn_stop,
+                                   self.btn_reset, self.btn_disconnect]):
+            btn.rect = pygame.Rect(rx, 130 + i * 44, rw, 36)
+
     # ── Построение UI ─────────────────────────────────────────────────────────
     def _build_ui(self):
         # --- Правая панель: кнопки управления ---
-        rx = LEFT_W + VIDEO_W + PAD
+        rx = LEFT_W + self._vw + PAD
         rw = SIDEBAR_W - 2 * PAD
 
         self.btn_connect    = Button((rx, 130, rw, 36), "Подключиться")
@@ -300,6 +328,8 @@ class App:
         ]
         self._dist_spins  = [self.spin_min_dist, self.spin_max_dist]
         self._left_spins  = self._speed_spins + self._dist_spins + [self.spin_gimbal]
+
+        self._reposition_sidebar_buttons()
 
     def _refresh_buttons(self):
         c = self.robot.is_connected
@@ -449,13 +479,13 @@ class App:
 
     # ── Видео: масштаб ────────────────────────────────────────────────────────
     def _compute_video_layout(self, fw, fh):
-        sx = VIDEO_W / fw
-        sy = WIN_H  / fh
+        sx = self._vw / fw
+        sy = self._wh  / fh
         self._vscale = min(sx, sy)
         dw = int(fw * self._vscale)
         dh = int(fh * self._vscale)
-        self._voff_x = (VIDEO_W - dw) // 2
-        self._voff_y = (WIN_H  - dh) // 2
+        self._voff_x = (self._vw - dw) // 2
+        self._voff_y = (self._wh  - dh) // 2
 
     def _screen_to_frame(self, sx, sy):
         """Перевод глобальных координат клика в координаты кадра камеры."""
@@ -594,7 +624,7 @@ class App:
 
     # ── Левая панель ──────────────────────────────────────────────────────────
     def _draw_left_panel(self):
-        panel = pygame.Surface((LEFT_W, WIN_H))
+        panel = pygame.Surface((LEFT_W, self._wh))
         panel.fill(C["left"])
         self.screen.blit(panel, (0, 0))
 
@@ -666,7 +696,7 @@ class App:
 
     # ── Видеопанель ───────────────────────────────────────────────────────────
     def _draw_video_panel(self):
-        panel = pygame.Surface((VIDEO_W, WIN_H))
+        panel = pygame.Surface((self._vw, self._wh))
         panel.fill(C["video_bg"])
 
         frame = None
@@ -691,17 +721,17 @@ class App:
         else:
             msg = "Нет подключения" if not self.robot.is_connected else "Ожидание камеры..."
             txt = self.font_title.render(msg, True, C["text_dim"])
-            panel.blit(txt, txt.get_rect(center=(VIDEO_W // 2, WIN_H // 2)))
+            panel.blit(txt, txt.get_rect(center=(self._vw // 2, self._wh // 2)))
 
         if self.is_tracking and self._track_fps > 0:
             fps_s = self.font_small.render(f"{self._track_fps:.1f} fps", True, C["text_dim"])
-            panel.blit(fps_s, (VIDEO_W - fps_s.get_width() - 8, 8))
+            panel.blit(fps_s, (self._vw - fps_s.get_width() - 8, 8))
 
         self.screen.blit(panel, (LEFT_W, 0))
 
     # ── Правая панель ─────────────────────────────────────────────────────────
     def _draw_sidebar(self):
-        sb = pygame.Surface((SIDEBAR_W, WIN_H))
+        sb = pygame.Surface((SIDEBAR_W, self._wh))
         sb.fill(C["sidebar"])
 
         y = 14
@@ -723,10 +753,10 @@ class App:
         sb.blit(lbl, (10, y))
         y += lbl.get_height() + 4
 
-        log_h = WIN_H - y - 80
+        log_h = self._wh - y - 80
         self._draw_log(sb, y, log_h)
 
-        y = WIN_H - 74
+        y = self._wh - 74
         pygame.draw.line(sb, C["divider"], (8, y), (SIDEBAR_W - 8, y))
         y += 6
         if self.is_tracking:
@@ -738,7 +768,7 @@ class App:
                 sb.blit(line, (10, y))
                 y += line.get_height() + 2
 
-        self.screen.blit(sb, (LEFT_W + VIDEO_W, 0))
+        self.screen.blit(sb, (LEFT_W + self._vw, 0))
 
         for btn in self._buttons:
             btn.draw(self.screen, self.font_med)
@@ -843,10 +873,15 @@ class App:
                         running = False
                     if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                         running = False
+                    if event.type == pygame.VIDEORESIZE:
+                        w = max(WIN_W_MIN, event.w)
+                        h = max(480, event.h)
+                        self.screen = pygame.display.set_mode((w, h), pygame.RESIZABLE)
+                        self._on_resize()
 
                     # Клик по видеообласти
                     if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
-                            and LEFT_W <= event.pos[0] < LEFT_W + VIDEO_W):
+                            and LEFT_W <= event.pos[0] < LEFT_W + self._vw):
                         self._handle_video_click(*event.pos)
 
                     # Правая панель: кнопки
