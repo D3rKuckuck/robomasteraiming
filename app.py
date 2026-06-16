@@ -873,10 +873,7 @@ class App:
                         running = False
                     if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                         running = False
-                    if event.type == pygame.VIDEORESIZE:
-                        w = max(WIN_W_MIN, event.w)
-                        h = max(480, event.h)
-                        self.screen = pygame.display.set_mode((w, h), pygame.RESIZABLE)
+                    if event.type == pygame.WINDOWRESIZED:
                         self._on_resize()
 
                     # Клик по видеообласти
