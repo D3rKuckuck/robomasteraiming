@@ -1,16 +1,26 @@
 import math
 import time
+
 import cv2
+import torch
 from ultralytics import YOLO
 
 
-class PersonTracker:
-    TRACK_TIMEOUT = 2.0       # секунд без трека — цель считается потерянной
-    SEARCH_TIMEOUT = 5.0     # секунд поиска перед сдачей
-    SEARCH_ROTATION_SPEED = 20
+def resolve_device(requested: str) -> str:
+    """Возвращает 'cuda' если запрошено GPU и CUDA доступна, иначе 'cpu'."""
+    if requested == 'cuda' and torch.cuda.is_available():
+        return 'cuda'
+    return 'cpu'
 
-    def __init__(self):
-        self.model = YOLO('yolo11n.pt')
+
+class PersonTracker:
+    TRACK_TIMEOUT = 2.0
+    SEARCH_TIMEOUT = 5.0
+    SEARCH_ROTATION_SPEED = 0.3  # об/с вокруг оси при поиске
+
+    def __init__(self, model_path='yolo11n.pt', device='cpu'):
+        self.device = device
+        self.model = YOLO(model_path)
         self.tracks = {}           # {track_id: (center_x, center_y)}
         self.selected_id = None
         self.last_seen_time = {}   # {track_id: timestamp}
@@ -27,15 +37,16 @@ class PersonTracker:
             classes=[0],
             conf=0.3,
             verbose=False,
+            device=self.device,
         )
 
         current_time = time.time()
         current_tracks = {}
 
         if results[0].boxes.id is not None:
-            boxes = results[0].boxes.xyxy.cpu().numpy()
-            track_ids = results[0].boxes.id.int().cpu().tolist()
-            class_ids = results[0].boxes.cls.int().cpu().tolist()
+            boxes       = results[0].boxes.xyxy.cpu().numpy()
+            track_ids   = results[0].boxes.id.int().cpu().tolist()
+            class_ids   = results[0].boxes.cls.int().cpu().tolist()
             confidences = results[0].boxes.conf.float().cpu().tolist()
 
             for box, track_id, cls_id, conf in zip(boxes, track_ids, class_ids, confidences):
@@ -48,7 +59,7 @@ class PersonTracker:
                 self.last_seen_time[track_id] = current_time
 
                 is_target = (track_id == self.selected_id)
-                color = (0, 0, 255) if is_target else (0, 255, 0)
+                color     = (0, 0, 255) if is_target else (0, 255, 0)
                 thickness = 3 if is_target else 2
                 cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, thickness)
                 cv2.circle(frame, (int(cx), int(cy)), 6, color, -1)
@@ -60,13 +71,13 @@ class PersonTracker:
 
     def select_nearest(self, x, y, radius=100):
         """Выбирает ближайший трек к точке (x, y) в координатах кадра."""
-        best_id = None
+        best_id   = None
         best_dist = float('inf')
         for track_id, (cx, cy) in self.tracks.items():
             dist = math.hypot(cx - x, cy - y)
             if dist < best_dist and dist < radius:
                 best_dist = dist
-                best_id = track_id
+                best_id   = track_id
 
         if best_id is not None:
             self.selected_id = best_id
