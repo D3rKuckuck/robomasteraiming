@@ -22,16 +22,16 @@ source .venv/bin/activate
 
 Установить зависимости:
 ```bash
-python -m pip install -r requirements.txt
+python3.8 -m pip install -r requirements.txt
 ```
 
-> **Важно:** использовать именно `python -m pip`, а не просто `pip`. На Ubuntu `pip` может указывать на системный Python (3.12), тогда как `python` после активации venv корректно берётся из `.venv`.
+> **Важно:** использовать именно `python3.8 -m pip`, а не просто `pip`. На Ubuntu `pip` и `python` могут указывать на системный Python (3.12).
 
 ### Запуск
 
 ```bash
 source .venv/bin/activate
-python main.py
+python3.8 main.py
 ```
 
 ### Работа с интерфейсом
