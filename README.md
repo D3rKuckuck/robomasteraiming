@@ -8,7 +8,7 @@
 ## Железо, Python и OS
 Запуск производился на ARDOR G15 с NVIDIA RTX 3050 и Intel i5-12450H.
 OS Ubuntu Noble
-python 3.8.20 (совместим с robomaster SDK)
+python 3.8.20 (совместим с robomaster SDK в версиях 3.6.6 -> 3.8.9)
 
 ## Инструкции
 
@@ -22,8 +22,10 @@ source .venv/bin/activate
 
 Установить зависимости:
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
+
+> **Важно:** использовать именно `python -m pip`, а не просто `pip`. На Ubuntu `pip` может указывать на системный Python (3.12), тогда как `python` после активации venv корректно берётся из `.venv`.
 
 ### Запуск
 
