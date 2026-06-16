@@ -81,7 +81,11 @@ class Button:
 
 # ── Числовой спиннер ──────────────────────────────────────────────────────────
 class SpinRow:
-    """Ряд [−] значение [+] в глобальных экранных координатах."""
+    """Ряд [−] значение [+] в глобальных экранных координатах.
+
+    Клик по полю значения → ввод с клавиатуры.
+    Enter / клик вне поля — применить. Escape — отмена.
+    """
 
     BTN_W = 26
 
@@ -92,12 +96,64 @@ class SpinRow:
         self.step    = step
         self.fmt     = fmt
         self.enabled = True
+        self.editing = False
+        self._buf    = ""
         bw = self.BTN_W
-        self.btn_minus   = pygame.Rect(x,          y, bw,      h)
-        self.btn_plus    = pygame.Rect(x + w - bw, y, bw,      h)
-        self.display     = pygame.Rect(x + bw,     y, w-2*bw,  h)
+        self.btn_minus = pygame.Rect(x,          y, bw,     h)
+        self.btn_plus  = pygame.Rect(x + w - bw, y, bw,     h)
+        self.display   = pygame.Rect(x + bw,     y, w-2*bw, h)
 
+    # ── Редактирование ────────────────────────────────────────────────────────
+    def start_edit(self):
+        self.editing = True
+        # Показываем текущее значение без суффикса (°, пробелы и т.д.)
+        raw = self.fmt.format(self.value)
+        self._buf = ''.join(c for c in raw if c in '0123456789.-')
+        pygame.key.start_text_input()
+
+    def commit(self):
+        """Применить введённое значение и выйти из режима редактирования."""
+        if self._buf:
+            try:
+                v = float(self._buf)
+                self.value = round(
+                    max(self.min_val, min(self.max_val, v)), 4
+                )
+            except ValueError:
+                pass
+        self.editing = False
+        self._buf = ""
+        pygame.key.stop_text_input()
+
+    def cancel(self):
+        self.editing = False
+        self._buf = ""
+        pygame.key.stop_text_input()
+
+    def handle_textinput(self, text):
+        """Принять символы из pygame.TEXTINPUT (только цифры, точка, минус)."""
+        for ch in text:
+            if ch in '0123456789.':
+                self._buf += ch
+            elif ch == '-' and not self._buf:
+                self._buf += ch
+
+    def handle_keydown(self, key):
+        """Обработать нажатие клавиши в режиме редактирования."""
+        if key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            self.commit()
+            return True
+        if key == pygame.K_ESCAPE:
+            self.cancel()
+            return True
+        if key == pygame.K_BACKSPACE:
+            self._buf = self._buf[:-1]
+            return True
+        return False
+
+    # ── Обычные события (+/−) ─────────────────────────────────────────────────
     def handle_event(self, event):
+        """Обрабатывает клики по кнопкам +/−. Клик по display управляется снаружи."""
         if not self.enabled:
             return False
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -109,18 +165,31 @@ class SpinRow:
                 return True
         return False
 
+    # ── Отрисовка ─────────────────────────────────────────────────────────────
     def draw(self, surf, font):
         mp = pygame.mouse.get_pos()
         for rect, label in ((self.btn_minus, "−"), (self.btn_plus, "+")):
-            hover = self.enabled and rect.collidepoint(mp)
+            hover = self.enabled and not self.editing and rect.collidepoint(mp)
             bg = C["btn_hover"] if hover else (C["btn"] if self.enabled else C["btn_off"])
             pygame.draw.rect(surf, bg, rect, border_radius=4)
             t = font.render(label, True, C["text"] if self.enabled else C["text_dim"])
             surf.blit(t, t.get_rect(center=rect.center))
-        pygame.draw.rect(surf, C["val_bg"], self.display)
-        vt = font.render(self.fmt.format(self.value), True,
-                         C["text"] if self.enabled else C["text_dim"])
-        surf.blit(vt, vt.get_rect(center=self.display.center))
+
+        if self.editing:
+            # Подсветка поля ввода
+            pygame.draw.rect(surf, C["btn"], self.display)
+            pygame.draw.rect(surf, C["blue"], self.display, 1)
+            # Мигающий курсор
+            cursor = "│" if (time.time() % 1.0 < 0.5) else " "
+            display_text = self._buf + cursor
+            vt = font.render(display_text, True, C["text"])
+            # Выравнивание по левому краю с отступом
+            surf.blit(vt, (self.display.x + 4, self.display.y + (self.display.h - vt.get_height()) // 2))
+        else:
+            pygame.draw.rect(surf, C["val_bg"], self.display)
+            vt = font.render(self.fmt.format(self.value), True,
+                             C["text"] if self.enabled else C["text_dim"])
+            surf.blit(vt, vt.get_rect(center=self.display.center))
 
 
 # ── Пара переключателей ───────────────────────────────────────────────────────
@@ -222,6 +291,7 @@ class App:
         self._fps_times: collections.deque = collections.deque(maxlen=30)
 
         self._wasd_moving = False
+        self._active_spin = None   # SpinRow в режиме редактирования
 
         self._build_ui()
 
@@ -871,10 +941,38 @@ class App:
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         running = False
-                    if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                        running = False
                     if event.type == pygame.WINDOWRESIZED:
                         self._on_resize()
+
+                    # ── Режим ввода с клавиатуры ─────────────────────────────
+                    if self._active_spin is not None:
+                        if event.type == pygame.TEXTINPUT:
+                            self._active_spin.handle_textinput(event.text)
+                            continue   # не обрабатываем событие дальше
+                        if event.type == pygame.KEYDOWN:
+                            if self._active_spin.handle_keydown(event.key):
+                                if not self._active_spin.editing:
+                                    self._active_spin = None
+                                continue
+                            # Escape без активного ввода — закрыть приложение
+                    else:
+                        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                            running = False
+
+                    # ── Клик: управление активным спиннером ──────────────────
+                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        clicked_spin = next(
+                            (s for s in self._left_spins
+                             if s.enabled and s.display.collidepoint(event.pos)),
+                            None
+                        )
+                        if self._active_spin and self._active_spin is not clicked_spin:
+                            self._active_spin.commit()
+                            self._active_spin = None
+                        if clicked_spin and clicked_spin is not self._active_spin:
+                            clicked_spin.start_edit()
+                            self._active_spin = clicked_spin
+                            continue   # не передаём клик дальше (иначе сработает +/−)
 
                     # Клик по видеообласти
                     if (event.type == pygame.MOUSEBUTTONDOWN and event.button == 1
@@ -895,12 +993,12 @@ class App:
                     if self.btn_gimbal.update(event):
                         threading.Thread(target=self._apply_gimbal, daemon=True).start()
 
-                    # Левая панель: спиннеры и переключатели
+                    # Левая панель: +/− кнопки и переключатели
                     for spin in self._left_spins:
                         spin.handle_event(event)
 
                     if self.toggle_model.handle_event(event):
-                        pass  # применится при следующем старте трекинга
+                        pass
                     if self.toggle_device.handle_event(event):
                         pass
 
