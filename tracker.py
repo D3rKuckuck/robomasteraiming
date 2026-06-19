@@ -16,7 +16,7 @@ def resolve_device(requested: str) -> str:
 class PersonTracker:
     TRACK_TIMEOUT = 2.0
     SEARCH_TIMEOUT = 5.0
-    SEARCH_ROTATION_SPEED = 0.3  # об/с вокруг оси при поиске
+    SEARCH_ROTATION_SPEED = 1.0  # рад/с вокруг оси при поиске
 
     def __init__(self, model_path='yolo11n.pt', device='cpu'):
         self.device = device
@@ -36,7 +36,7 @@ class PersonTracker:
             tracker="custom_track.yaml",
             classes=[0],
             conf=0.3,
-            verbose=False,
+            verbose=True,
             device=self.device,
         )
 

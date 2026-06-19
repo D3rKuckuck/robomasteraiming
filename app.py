@@ -350,21 +350,19 @@ class App:
 
         # ── Скорости вращения ─────────────────────────────────── y=8
         # label at 30, spin at 45
-        self.spin_max_rot = spin(45,  1.0, 0.1, 3.0, 0.1)   # bottom=69
-        # label at 73, spin at 88
-        self.spin_min_rot = spin(88,  0.1, 0.1, 3.0, 0.1)   # bottom=112
+        self.spin_max_rot = spin(45,  1.0, 0.01, 3.0, 0.01, "{:.2f}")
 
         # ── Скорость вперёд ───────────────────────────────────── y=120
         # label at 142, spin at 157
-        self.spin_max_fwd = spin(157, 1.0, 0.1, 8.0, 0.1)   # bottom=181
+        self.spin_max_fwd = spin(157, 1.0, 0.01, 8.0, 0.01, "{:.2f}")
         # label at 185, spin at 200
-        self.spin_min_fwd = spin(200, 0.1, 0.1, 8.0, 0.1)   # bottom=224
+        self.spin_min_fwd = spin(200, 0.1, 0.01, 8.0, 0.01, "{:.2f}")
 
         # ── Скорость назад ────────────────────────────────────── y=232
         # label at 254, spin at 269
-        self.spin_max_bwd = spin(269, 0.5, 0.1, 8.0, 0.1)   # bottom=293
+        self.spin_max_bwd = spin(269, 0.5, 0.01, 8.0, 0.01, "{:.2f}")
         # label at 297, spin at 312
-        self.spin_min_bwd = spin(312, 0.1, 0.1, 8.0, 0.1)   # bottom=336
+        self.spin_min_bwd = spin(312, 0.1, 0.01, 8.0, 0.01, "{:.2f}")
 
         # ── Дистанция ─────────────────────────────────────────── y=344
         # label at 366, spin at 381
@@ -392,7 +390,7 @@ class App:
         self.btn_gimbal  = Button((lx, 665, lw, 26), "Применить угол", enabled=False)
 
         self._speed_spins = [
-            self.spin_max_rot, self.spin_min_rot,
+            self.spin_max_rot,
             self.spin_max_fwd, self.spin_min_fwd,
             self.spin_max_bwd, self.spin_min_bwd,
         ]
@@ -643,8 +641,7 @@ class App:
             tx, _ = tr.tracks[tr.selected_id]
             w1, w2, w3, w4 = calculate_movement_speeds(
                 tx, self._frame_w, self.robot.distance_mm,
-                max_rotation_rev_s = self.spin_max_rot.value,
-                min_rotation_rev_s = self.spin_min_rot.value,
+                max_rotation_rad_s = self.spin_max_rot.value,
                 max_fwd_m_s        = self.spin_max_fwd.value,
                 min_fwd_m_s        = self.spin_min_fwd.value,
                 max_bwd_m_s        = self.spin_max_bwd.value,
@@ -720,11 +717,9 @@ class App:
             return y + t.get_height() + 2
 
         # ── Скорости вращения ──────── y=8
-        section("СКОРОСТИ ВРАЩЕНИЯ (об/с)", 8)
+        section("СКОРОСТИ ВРАЩЕНИЯ (рад/с)", 8)
         lbl("Макс. скорость поворота",  30)
         self.spin_max_rot.draw(self.screen, self.font_small)
-        lbl("Мин. скорость (мёртвая зона)", 73)
-        self.spin_min_rot.draw(self.screen, self.font_small)
 
         # ── Скорость вперёд ────────── y=120
         section("СКОРОСТЬ ВПЕРЁД (м/с)", 120)
