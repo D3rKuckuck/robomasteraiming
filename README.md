@@ -60,7 +60,6 @@ source .venv/bin/activate
 
 - Windows 10/11 (64-bit)
 - Python **3.8.x** (обязательно именно 3.8, для совместимости с robomaster SDK) — скачать с [python.org](https://www.python.org/downloads/release/python-3820/)
-- NVIDIA GPU + [CUDA Toolkit 12.1](https://developer.nvidia.com/cuda-12-1-0-download-archive) (опционально, для ускорения на GPU)
 - [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) — нужны для сборки некоторых зависимостей
 
 > При установке Python обязательно поставить галочку **"Add Python to PATH"**.
