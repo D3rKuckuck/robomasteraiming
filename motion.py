@@ -42,13 +42,13 @@ def calculate_movement_speeds(target_x, frame_width, distance_mm,
     if abs(error_x) > center_x / 2:
         move_m_s = 0.0  # сначала довернуть, движение заблокировано
     elif distance_mm < min_dist_mm:
-        ratio = _scale(distance_mm, [0, min_dist_mm], [1.0, 0.0])
-        move_m_s = -max(min_bwd_m_s, ratio * max_bwd_m_s)
+        move_m_s = _scale(distance_mm, [0, min_dist_mm], [-max_bwd_m_s, 0.0])
+        if abs(move_m_s) < min_bwd_m_s:
+            move_m_s = 0.0
     elif distance_mm > max_dist_mm:
         move_m_s = max_fwd_m_s
     else:
-        t = _scale(distance_mm, [min_dist_mm, max_dist_mm], [0.0, 1.0])
-        move_m_s = t * max_fwd_m_s
+        move_m_s = _scale(distance_mm, [min_dist_mm, max_dist_mm], [0.0, max_fwd_m_s])
         if 0 < move_m_s < min_fwd_m_s:
             move_m_s = 0.0
     move = move_m_s * _MOVE_SCALE  # RPM
